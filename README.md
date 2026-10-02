@@ -319,7 +319,7 @@ src/
 - [x] Process-stable `claude_id` across `/clear`; supervisor skips injection when a hook already delivered, and never submits a half-typed draft
 - [ ] Real-world soak across many concurrent supervisor sessions
 - [ ] Network mode: heartbeat-based liveness + remote transcript access (see docs/transport.md)
-- [ ] Publish 0.2.0 to npm (registry is still at 0.1.1)
+- [x] Publish 0.2.0 to npm (2026-10-02)
 - [x] Reply chains: `from` is the sender's own session in both the MCP tool and the CLI (which walks the process tree from inside claude's Bash tool); pasted messages carry a `reply with send_message to "<id>"` line
 - [x] Desktop notification fallback for un-supervised idle sessions (`notify`)
 - [x] Inject the message body itself instead of an `[inbox]` sentinel — bracketed paste, sender attribution, `inject_mode: "sentinel"` kept as fallback. Verified live: ~250ms send→paste, model acts on it
