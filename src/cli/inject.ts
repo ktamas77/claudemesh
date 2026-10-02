@@ -65,15 +65,27 @@ export function renderForPaste(
 ): string {
   return messages
     .map((m) => {
+      const from = sanitize(m.from);
       const name = nameOf(m.from);
-      const who = name ? `${m.from} (${name})` : m.from;
+      const who = name ? `${from} (${sanitize(name)})` : from;
       const tag = m.kind === "note" ? "note" : "message";
-      return `[claudemesh ${tag} from ${who} — reply with send_message to "${m.from}"]\n${m.body}`;
+      return `[claudemesh ${tag} from ${who} — reply with send_message to "${from}"]\n${sanitize(m.body)}`;
     })
     .join("\n\n");
 }
 
+/**
+ * Everything pasted into claude is typed into a terminal, so a peer (or a model-authored body)
+ * must not be able to smuggle an in-band paste terminator or escape sequences that the TUI
+ * would act on as keystrokes. Keep newlines and tabs; drop every other control byte, ESC first.
+ */
+export function sanitize(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\x1b/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+}
+
 /** Wrap text so the terminal app receives it as a single paste (claude enables mode 2004). */
 export function wrapPaste(text: string): string {
-  return `${PASTE_START}${text}${PASTE_END}`;
+  // Belt and braces: no code path may emit the terminator inside the paste.
+  return `${PASTE_START}${text.replaceAll(PASTE_END, "")}${PASTE_END}`;
 }

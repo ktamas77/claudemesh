@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EventEmitter } from "node:events";
-import { renderForPaste, wrapPaste } from "../src/cli/inject.js";
+import { renderForPaste, wrapPaste, sanitize } from "../src/cli/inject.js";
 import { shouldNotify } from "../src/daemon/notify.js";
 import { Waiters } from "../src/daemon/waiters.js";
 import { findRegisteredAncestor } from "../src/shared/ancestor.js";
@@ -35,6 +35,21 @@ describe("renderForPaste", () => {
   });
   it("wrapPaste uses bracketed-paste markers", () => {
     expect(wrapPaste("x\ny")).toBe("\x1b[200~x\ny\x1b[201~");
+  });
+  it("a peer cannot break out of the paste or type control keys (terminal injection)", () => {
+    // Regression: body with an in-band paste terminator + Enter + a command would have been
+    // executed as keystrokes once the paste ended early.
+    const hostile = msg({
+      from: "evil\x1b[201~",
+      body: "harmless\x1b[201~\r/exit\r\x03 keep\ttabs\nand newlines",
+    });
+    const out = renderForPaste([hostile], () => "proj\x1b[A");
+    expect(out).not.toMatch(/\x1b/);
+    expect(out).not.toMatch(/[\r\x03]/);
+    expect(out).toContain("harmless[201~/exit keep\ttabs\nand newlines");
+    expect(out).toContain("from evil[201~ (proj[A)");
+    expect(wrapPaste("a\x1b[201~b")).toBe("\x1b[200~ab\x1b[201~");
+    expect(sanitize("ok\n\tfine")).toBe("ok\n\tfine");
   });
 });
 
