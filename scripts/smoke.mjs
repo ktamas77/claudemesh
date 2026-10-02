@@ -1,24 +1,39 @@
 #!/usr/bin/env node
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const BIN = join(__dirname, "..", "dist", "bin", "claudemesh.js");
 
+// Self-contained: isolated state dir (inherited by the hook/statusline subprocesses below),
+// daemon auto-spawned on whatever transport the config in that dir says (default: unix socket).
+process.env.CLAUDEMESH_HOME ??= mkdtempSync(join(tmpdir(), "claudemesh-smoke-"));
+const { ensureDaemonRunning, readDaemonPid } = await import("../dist/shared/daemon-spawn.js");
+const { loadConfig, socketPath } = await import("../dist/shared/config.js");
+await ensureDaemonRunning();
+const cfg = loadConfig();
+console.log(`daemon pid ${readDaemonPid()} via ${cfg.transport} (${process.env.CLAUDEMESH_HOME})`);
+
 function call(method, path, body) {
   return new Promise((resolve, reject) => {
     const payload = body && Buffer.from(JSON.stringify(body));
     const req = http.request(
       {
-        host: "127.0.0.1",
-        port: 7878,
+        ...(cfg.transport === "unix"
+          ? { socketPath: socketPath(cfg) }
+          : { host: cfg.host, port: cfg.port }),
         path,
         method,
-        headers: payload
-          ? { "content-type": "application/json", "content-length": payload.length }
-          : {},
+        headers: {
+          ...(payload
+            ? { "content-type": "application/json", "content-length": payload.length }
+            : {}),
+          ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}),
+        },
       },
       (res) => {
         const chunks = [];
@@ -64,8 +79,10 @@ function ok(label, cond) {
   if (!cond) process.exitCode = 1;
 }
 
-// Use this script's own pid as the fake "claude_pid" so liveness sweep doesn't prune.
+// Two live pids (identity is per claude process, so A and B need distinct ones) that the
+// liveness sweep won't prune: this script and its parent shell.
 const fakeClaudePid = process.pid;
+const fakeClaudePidB = process.ppid;
 
 // 1. Direct daemon API
 const a = await call("POST", "/register", {
@@ -74,10 +91,13 @@ const a = await call("POST", "/register", {
   cwd: "/tmp/A",
   transcript_path: "/tmp/A.jsonl",
 });
-ok("register A returns 200 + claude_id", a.status === 200 && /^[a-z0-9]{8}$/.test(a.body.claude_id));
+ok(
+  "register A returns 200 + claude_id",
+  a.status === 200 && /^[a-z0-9]{8}$/.test(a.body.claude_id),
+);
 const b = await call("POST", "/register", {
   session_id: "smoke-B",
-  claude_pid: fakeClaudePid,
+  claude_pid: fakeClaudePidB,
   cwd: "/tmp/B",
   transcript_path: "/tmp/B.jsonl",
 });
@@ -116,7 +136,10 @@ ok("send to unknown id → 404", wrong.status === 404);
 
 // 2. Statusline
 const sl1 = await runBin(["statusline"], JSON.stringify({ session_id: "smoke-A" }));
-ok(`statusline shows id+peers (got: ${sl1.stdout.trim()})`, sl1.stdout.includes(a.body.claude_id) && sl1.stdout.includes("peers"));
+ok(
+  `statusline shows id+peers (got: ${sl1.stdout.trim()})`,
+  sl1.stdout.includes(a.body.claude_id) && sl1.stdout.includes("peers"),
+);
 
 // Send a message back to A to verify ✉ count appears
 await call("POST", `/instances/${a.body.claude_id}/messages`, {
@@ -165,7 +188,21 @@ await call("POST", `/instances/${a.body.claude_id}/messages`, {
 const stopOut2 = await runBin(["hook", "stop"], JSON.stringify({ session_id: "smoke-A" }));
 ok("Stop hook does NOT block on note-only inbox", stopOut2.stdout.trim() === "");
 
+// 5. /clear: same pid, new session_id → same claude_id, no ghost
+const a2 = await call("POST", "/register", {
+  session_id: "smoke-A-cleared",
+  claude_pid: fakeClaudePid,
+  cwd: "/tmp/A",
+  transcript_path: "/tmp/A.jsonl",
+});
+ok("re-register same pid keeps claude_id", a2.body.claude_id === a.body.claude_id);
+const list2 = await call("GET", "/instances");
+ok("no ghost record after /clear", list2.body.filter((r) => r.cwd === "/tmp/A").length === 1);
+
 // cleanup
 await call("DELETE", `/instances/${a.body.claude_id}`);
 await call("DELETE", `/instances/${b.body.claude_id}`);
+try {
+  process.kill(readDaemonPid(), "SIGTERM");
+} catch {}
 console.log("done");

@@ -3,12 +3,12 @@ import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { daemon, DaemonError } from "../shared/client.js";
 import { ensureDaemonRunning } from "../shared/daemon-spawn.js";
+import { decideInject, updateDraft, type InputState } from "./inject.js";
 
 type IPty = NodePty.IPty;
 
 const POLL_REGISTER_INTERVAL_MS = 100;
 const EVENTS_LONG_POLL_MS = 25_000;
-const STDIN_QUIET_THRESHOLD_MS = 500;
 const INJECT_RETRY_MS = 250;
 const WAKE_SENTINEL = "[inbox]";
 
@@ -69,10 +69,12 @@ export async function runChild(args: string[]): Promise<void> {
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
 
-  let lastUserKeystrokeAt = 0;
+  const input: InputState = { lastKeystrokeAt: 0, draftPending: false };
   const onStdin = (data: Buffer | string): void => {
-    lastUserKeystrokeAt = Date.now();
-    child.write(typeof data === "string" ? data : data.toString("utf8"));
+    const text = typeof data === "string" ? data : data.toString("utf8");
+    input.lastKeystrokeAt = Date.now();
+    input.draftPending = updateDraft(input.draftPending, text);
+    child.write(text);
   };
   process.stdin.on("data", onStdin);
 
@@ -108,7 +110,7 @@ export async function runChild(args: string[]): Promise<void> {
     });
   });
 
-  const subscriberCancel = startSubscriber(child, () => lastUserKeystrokeAt);
+  const subscriberCancel = startSubscriber(child, input);
 
   const code = await exitCode;
   subscriberCancel();
@@ -128,17 +130,13 @@ export async function runChild(args: string[]): Promise<void> {
   process.exitCode = code;
 }
 
-function startSubscriber(child: IPty, lastUserKeystrokeAt: () => number): () => void {
+function startSubscriber(child: IPty, input: InputState): () => void {
   let cancelled = false;
   let claudeId: string | null = null;
   let pendingWake = false;
 
   const tryInject = (): void => {
     if (cancelled || !pendingWake) return;
-    if (Date.now() - lastUserKeystrokeAt() < STDIN_QUIET_THRESHOLD_MS) {
-      setTimeout(tryInject, INJECT_RETRY_MS);
-      return;
-    }
     if (!claudeId) {
       setTimeout(tryInject, INJECT_RETRY_MS);
       return;
@@ -147,15 +145,20 @@ function startSubscriber(child: IPty, lastUserKeystrokeAt: () => number): () => 
       .get(claudeId)
       .then((rec) => {
         if (cancelled || !pendingWake) return;
-        if (!rec.idle) {
-          setTimeout(tryInject, INJECT_RETRY_MS);
-          return;
-        }
-        try {
-          child.write(`${WAKE_SENTINEL}\r`);
-          pendingWake = false;
-        } catch {
-          // child gone
+        switch (decideInject(rec, input, Date.now())) {
+          case "retry":
+            setTimeout(tryInject, INJECT_RETRY_MS);
+            return;
+          case "drop":
+            pendingWake = false;
+            return;
+          case "inject":
+            try {
+              child.write(`${WAKE_SENTINEL}\r`);
+              pendingWake = false;
+            } catch {
+              // child gone
+            }
         }
       })
       .catch(() => setTimeout(tryInject, INJECT_RETRY_MS));

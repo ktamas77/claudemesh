@@ -1,6 +1,6 @@
 {
   "name": "claudemesh",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Local side-channel between Claude Code instances: discover, message, and read other claude CLI sessions on the same machine.",
   "license": "MIT",
   "author": "Tamas Kalman",

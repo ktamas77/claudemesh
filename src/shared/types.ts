@@ -21,9 +21,18 @@ export interface InboxMessage {
   ts: string;
 }
 
+export type Transport = "unix" | "tcp";
+
 export interface DaemonConfig {
-  port: number;
+  /** "unix" (default on macOS/Linux): per-user socket file. "tcp": host:port (default on Windows). */
+  transport: Transport;
+  /** Socket file path for transport "unix". Defaults to ~/.claudemesh/daemon.sock. */
+  socket_path?: string;
+  /** TCP bind/connect address. Non-loopback hosts require `token`. */
   host: string;
+  port: number;
+  /** Shared secret sent as `Authorization: Bearer <token>`. Required for non-loopback TCP. */
+  token?: string;
   redact: {
     enabled: boolean;
     line_byte_cap: number;
@@ -35,6 +44,7 @@ export interface DaemonConfig {
 }
 
 export const DEFAULT_CONFIG: DaemonConfig = {
+  transport: process.platform === "win32" ? "tcp" : "unix",
   port: 7878,
   host: "127.0.0.1",
   redact: {

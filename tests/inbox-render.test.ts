@@ -32,7 +32,9 @@ describe("inbox prompt rendering", () => {
 
     it("embeds the message body inside an <inbox-message> tag with from/kind/at attributes", () => {
       const text = renderForBlock([sampleTask]);
-      expect(text).toContain('<inbox-message from="pbs83z6q" kind="task" at="2026-05-01T00:00:00Z">');
+      expect(text).toContain(
+        '<inbox-message from="pbs83z6q" kind="task" at="2026-05-01T00:00:00Z">',
+      );
       expect(text).toContain("rerun the migration check");
       expect(text).toContain("</inbox-message>");
     });
@@ -60,7 +62,9 @@ describe("inbox prompt rendering", () => {
 
     it("embeds messages with the same <inbox-message> envelope", () => {
       const text = renderMessages([sampleTask]);
-      expect(text).toContain('<inbox-message from="pbs83z6q" kind="task" at="2026-05-01T00:00:00Z">');
+      expect(text).toContain(
+        '<inbox-message from="pbs83z6q" kind="task" at="2026-05-01T00:00:00Z">',
+      );
       expect(text).toContain("rerun the migration check");
       expect(text).toContain("</inbox-message>");
     });

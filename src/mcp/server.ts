@@ -9,6 +9,7 @@ import { daemon, DaemonError } from "../shared/client.js";
 import { ensureDaemonRunning } from "../shared/daemon-spawn.js";
 import { resolveTargetId } from "../shared/resolve.js";
 import type { MessageKind } from "../shared/types.js";
+import { packageVersion } from "../shared/version.js";
 
 const TOOLS: Tool[] = [
   {
@@ -162,7 +163,7 @@ function fail(message: string): {
 
 export async function runMcpServer(): Promise<void> {
   const server = new Server(
-    { name: "claudemesh", version: "0.1.0" },
+    { name: "claudemesh", version: packageVersion() },
     { capabilities: { tools: {} } },
   );
 

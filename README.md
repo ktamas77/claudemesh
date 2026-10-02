@@ -47,7 +47,8 @@ There are two layers, and you can use either independently:
    │                                            │
    │              ┌─────────────────────────┐   │
    │              │  claudemesh daemon        │   │
-   │              │  HTTP @ 127.0.0.1:7878  │   │
+   │              │  HTTP @ ~/.claudemesh/  │   │
+   │              │    daemon.sock (or TCP) │   │
    │              │  • registry + idle flag │   │
    │              │  • inboxes              │   │
    │              │  • events long-poll     │   │
@@ -56,7 +57,7 @@ There are two layers, and you can use either independently:
    └────────────────────────────────────────────┘
 ```
 
-The daemon binds to `127.0.0.1` only. State persists to `~/.claudemesh/`.
+The daemon listens on a `0600` unix socket in `~/.claudemesh/` by default (TCP on loopback is opt-in, see [Configuration](#configuration)). State persists to `~/.claudemesh/`.
 
 ### Realtime via the supervisor
 
@@ -226,12 +227,34 @@ The daemon stores an `idle: boolean` per session, kept in sync by the hooks:
 
 The supervisor reads this flag before injecting, ensuring it never types into a session that's mid-turn.
 
+## Configuration
+
+`~/.claudemesh/config.json` (all keys optional):
+
+```json
+{
+  "transport": "unix",
+  "socket_path": "~/.claudemesh/daemon.sock",
+  "host": "127.0.0.1",
+  "port": 7878,
+  "token": null,
+  "redact": { "enabled": true, "line_byte_cap": 4096 },
+  "statusline": { "show_peers": true, "show_inbox": true }
+}
+```
+
+- `transport`: `"unix"` (default on macOS/Linux) or `"tcp"` (default on Windows). Switching restarts the daemon on the next command.
+- `token`: shared secret sent as a bearer header. Required when `host` is not loopback. Cross-machine use is not supported yet; [docs/transport.md](./docs/transport.md) explains what is missing.
+- `CLAUDEMESH_HOME` env var relocates the whole state directory (used by the tests).
+
 ## Privacy & security
 
-- Daemon binds to `127.0.0.1` only — never `0.0.0.0`. Single-user assumption matches the rest of `~/.claude`.
+- Daemon listens on a per-user `0600` unix socket by default, so other users on the same machine cannot reach it. TCP is opt-in; binding a non-loopback address is refused unless a shared `token` is configured. See [docs/transport.md](./docs/transport.md).
+- `claude_id` is stable per claude _process_: `/clear` (new session_id, same pid) keeps the id, so peers' addresses and pending inbox messages survive it.
+- The daemon reports its version on `/healthz`; a CLI/daemon version mismatch after an upgrade restarts the daemon automatically.
 - `read_history` redacts large tool results / file contents above a per-line byte cap by default. Pass `redact: false` (or use `get_turn`) for raw.
 - Hooks fail open: any daemon error is logged and the hook exits 0. Claude Code keeps working with no claudemesh integration if the daemon is down.
-- The supervisor never writes to the PTY without (a) idle flag set and (b) ≥500ms stdin silence — so it can't corrupt input you're typing.
+- The supervisor never writes to the PTY unless (a) the idle flag is set, (b) the inbox is still non-empty (a hook may have delivered the message first), (c) ≥500ms of stdin silence, and (d) no half-typed draft is pending (printable keys since the last Enter / ctrl-c / ctrl-u). Escape sequences such as arrow keys never count as a draft.
 
 ## Development
 
@@ -244,7 +267,8 @@ npm run dev         # tsc --watch
 npm run lint        # eslint
 npm run format      # prettier --write
 npm run typecheck   # tsc --noEmit
-npm test            # vitest run
+npm test            # vitest run (unit + a real daemon over a unix socket in a temp dir)
+node scripts/smoke.mjs   # end-to-end through dist/: daemon spawn, hooks, statusline, /clear
 ```
 
 Pre-commit (husky) runs `typecheck → test → lint-staged`. A broken type or failing test blocks the commit.
@@ -256,11 +280,12 @@ src/
 ├── bin/claudemesh.ts          # entrypoint, dispatches all subcommands
 ├── cli/
 │   ├── run.ts               # PTY supervisor (default `claudemesh` entrypoint)
+│   ├── inject.ts            # pure "may we type into claude now?" decision (tested)
 │   ├── send.ts, history.ts, search.ts, list.ts, whoami.ts, status.ts
 │   ├── install.ts, statusline.ts
 │   └── ...
 ├── daemon/
-│   ├── server.ts            # HTTP routes incl. /events long-poll, PATCH idle
+│   ├── server.ts            # HTTP routes incl. /events long-poll, PATCH idle; unix socket or TCP
 │   ├── registry.ts          # id ↔ session ↔ pid ↔ cwd, idle flag
 │   ├── inbox.ts             # per-recipient jsonl
 │   ├── waiters.ts           # pub-sub for the events long-poll
@@ -279,10 +304,17 @@ src/
 - [x] Phase 4 — liveness sweep + lazy daemon autostart
 - [x] Phase 5 — folder-name addressing, sharper imperative inbox prompts
 - [x] Phase 6 — `claudemesh` PTY supervisor for realtime injection (with subcommand passthrough)
+- [x] Unix-socket transport by default, TCP opt-in, bearer token for non-loopback, daemon version check on upgrade
+- [x] Process-stable `claude_id` across `/clear`; supervisor skips injection when a hook already delivered, and never submits a half-typed draft
 - [ ] Real-world soak across many concurrent supervisor sessions
+- [ ] Network mode: heartbeat-based liveness + remote transcript access (see docs/transport.md)
 - [ ] Reply chains: auto-set `from` when a recipient calls `send_message` after waking
 - [ ] Optional desktop notification fallback for un-supervised idle sessions
 - [ ] Inject the message body itself instead of an `[inbox]` sentinel (bracketed paste for multi-line; prepend `from <id> · ` for attribution; preserve existing path as fallback when paste mode unavailable)
+
+### Why not tmux?
+
+tmux's `send-keys` / `list-panes` could replace the daemon and the PTY supervisor outright. We considered it and kept the current design because it would require every session to run inside tmux, and the parts tmux cannot replace (idle hooks, transcript reader) are the ones that matter for safety. Full pro/con in [docs/why-not-tmux.md](./docs/why-not-tmux.md).
 
 ## License
 

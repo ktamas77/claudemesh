@@ -3,7 +3,9 @@ import { Registry } from "./registry.js";
 import { InboxStore } from "./inbox.js";
 import { Waiters } from "./waiters.js";
 import { startLivenessSweep } from "./liveness.js";
-import { loadConfig } from "../shared/config.js";
+import { loadConfig, socketPath, validateServeConfig } from "../shared/config.js";
+import { packageVersion } from "../shared/version.js";
+import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { readTranscript, searchTranscript, getTurn } from "../shared/transcript.js";
 import type { InstanceRecord, MessageKind } from "../shared/types.js";
 
@@ -26,6 +28,8 @@ export interface DaemonHandle {
 
 export async function startDaemon(): Promise<DaemonHandle> {
   const cfg = loadConfig();
+  const invalid = validateServeConfig(cfg);
+  if (invalid) throw new Error(invalid);
   const registry = new Registry();
   const inbox = new InboxStore();
   const waiters = new Waiters();
@@ -33,31 +37,65 @@ export async function startDaemon(): Promise<DaemonHandle> {
   const sweepTimer = startLivenessSweep(registry);
 
   const server = createServer((req, res) => {
+    if (cfg.token && req.headers.authorization !== `Bearer ${cfg.token}`) {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
     handle(req, res, registry, inbox, waiters).catch((err: unknown) => {
       sendJson(res, 500, { error: (err as Error).message });
     });
   });
 
-  await new Promise<void>((resolve) => {
-    server.listen(cfg.port, cfg.host, () => resolve());
+  const sock = cfg.transport === "unix" ? socketPath(cfg) : null;
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    if (sock) {
+      // We only get spawned when nobody answered on this socket, so a leftover file is stale.
+      if (existsSync(sock)) unlinkSync(sock);
+      server.listen(sock, () => {
+        chmodSync(sock, 0o600);
+        resolve();
+      });
+    } else {
+      server.listen(cfg.port, cfg.host, () => resolve());
+    }
   });
+  const removeSocket = (): void => {
+    if (sock && existsSync(sock)) {
+      try {
+        unlinkSync(sock);
+      } catch {
+        // best effort
+      }
+    }
+  };
 
   const onSignal = (signal: NodeJS.Signals): void => {
     console.error(`[claudemesh-daemon] received ${signal}, shutting down`);
     clearInterval(sweepTimer);
     waiters.closeAll();
-    server.close(() => process.exit(0));
+    server.close(() => {
+      removeSocket();
+      process.exit(0);
+    });
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
 
-  console.error(`[claudemesh-daemon] listening on http://${cfg.host}:${cfg.port}`);
+  console.error(
+    `[claudemesh-daemon] v${packageVersion()} listening on ${sock ?? `http://${cfg.host}:${cfg.port}`}`,
+  );
 
   return {
     close(): Promise<void> {
       clearInterval(sweepTimer);
       waiters.closeAll();
-      return new Promise((resolve) => server.close(() => resolve()));
+      return new Promise((resolve) =>
+        server.close(() => {
+          removeSocket();
+          resolve();
+        }),
+      );
     },
   };
 }
@@ -177,7 +215,11 @@ function instanceRoute(ctx: RouteContext, claudeId: string, sub: string): void {
 }
 
 function health(ctx: RouteContext): void {
-  sendJson(ctx.res, 200, { ok: true, instances: ctx.registry.list().length });
+  sendJson(ctx.res, 200, {
+    ok: true,
+    instances: ctx.registry.list().length,
+    version: packageVersion(),
+  });
 }
 
 function register(ctx: RouteContext): void {

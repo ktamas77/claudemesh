@@ -38,24 +38,33 @@ export class Registry {
   }
 
   register(args: RegisterArgs): InstanceRecord {
-    const existing = this.bySession.get(args.session_id);
-    if (existing !== undefined) {
-      const rec = this.byId.get(existing);
-      if (rec) {
-        rec.last_active = nowIso();
-        rec.claude_pid = args.claude_pid;
-        rec.cwd = args.cwd;
-        rec.transcript_path = args.transcript_path;
-        // Re-registering at SessionStart: claude is at the prompt awaiting
-        // input — that's our definition of idle from the supervisor's POV.
-        // (UserPromptSubmit will flip it back to false the moment a real
-        // prompt is submitted, including the supervisor's [inbox] sentinel.)
-        rec.idle = true;
-        this.byClaudePid.set(args.claude_pid, existing);
-        this.persist();
-        this.writeSessionFile(rec);
-        return rec;
+    // Identity is stable per claude *process*: the same pid re-registering with a new
+    // session_id (e.g. after `/clear`, which fires SessionStart again) keeps its claude_id,
+    // so peers' addresses, the inbox and the MCP server's cached self all stay valid.
+    // Session-id match is tried first so `--resume` in a fresh process also reattaches.
+    const existingId = this.bySession.get(args.session_id) ?? this.byClaudePid.get(args.claude_pid);
+    const existing = existingId ? this.byId.get(existingId) : undefined;
+    if (existing) {
+      if (existing.session_id !== args.session_id) {
+        this.bySession.delete(existing.session_id);
+        this.removeSessionFile(existing.session_id);
+        existing.session_id = args.session_id;
+        this.bySession.set(args.session_id, existing.claude_id);
       }
+      if (existing.claude_pid !== args.claude_pid) {
+        this.byClaudePid.delete(existing.claude_pid);
+        existing.claude_pid = args.claude_pid;
+        this.byClaudePid.set(args.claude_pid, existing.claude_id);
+      }
+      existing.last_active = nowIso();
+      existing.cwd = args.cwd;
+      existing.transcript_path = args.transcript_path;
+      // Re-registering at SessionStart: claude is at the prompt awaiting input — that's
+      // idle from the supervisor's POV. UserPromptSubmit flips it back to false.
+      existing.idle = true;
+      this.persist();
+      this.writeSessionFile(existing);
+      return existing;
     }
     const claudeId = this.uniqueId();
     const rec: InstanceRecord = {

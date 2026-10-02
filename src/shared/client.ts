@@ -1,6 +1,6 @@
 import { request as httpRequest, Agent as HttpAgent } from "node:http";
-import { loadConfig } from "./config.js";
-import type { InstanceRecord, InboxMessage, MessageKind } from "./types.js";
+import { loadConfig, socketPath } from "./config.js";
+import type { DaemonConfig, InstanceRecord, InboxMessage, MessageKind } from "./types.js";
 
 const keepAliveAgent = new HttpAgent({
   keepAlive: true,
@@ -45,7 +45,7 @@ async function call<T>(
 
   while (true) {
     try {
-      return await rawCall<T>(cfg.host, cfg.port, method, path, body, timeoutMs);
+      return await rawCall<T>(cfg, method, path, body, timeoutMs);
     } catch (err) {
       lastError = err;
       const elapsed = Date.now() - start;
@@ -58,8 +58,7 @@ async function call<T>(
 }
 
 function rawCall<T>(
-  host: string,
-  port: number,
+  cfg: DaemonConfig,
   method: string,
   path: string,
   body: unknown | undefined,
@@ -69,14 +68,16 @@ function rawCall<T>(
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
     const req = httpRequest(
       {
-        host,
-        port,
+        ...(cfg.transport === "unix"
+          ? { socketPath: socketPath(cfg) }
+          : { host: cfg.host, port: cfg.port }),
         path,
         method,
         agent: keepAliveAgent,
         headers: {
           "content-type": "application/json",
           ...(payload ? { "content-length": String(payload.length) } : {}),
+          ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}),
         },
         timeout: timeoutMs,
       },
@@ -131,7 +132,7 @@ export interface RegisterPayload {
 }
 
 export const daemon = {
-  health(opts?: ClientOptions): Promise<{ ok: true; instances: number }> {
+  health(opts?: ClientOptions): Promise<{ ok: true; instances: number; version?: string }> {
     return call("GET", "/healthz", undefined, opts);
   },
   register(payload: RegisterPayload, opts?: ClientOptions): Promise<{ claude_id: string }> {
