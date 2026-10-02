@@ -7,8 +7,16 @@ interface Waiter {
 
 export class Waiters {
   private byId = new Map<string, Set<Waiter>>();
+  private lastSeen = new Map<string, number>();
+
+  /** True if a supervisor long-polled this id within `withinMs` — i.e. the session is supervised. */
+  recentlySeen(claudeId: string, withinMs: number, now = Date.now()): boolean {
+    const t = this.lastSeen.get(claudeId);
+    return t !== undefined && now - t <= withinMs;
+  }
 
   add(claudeId: string, res: ServerResponse, timeoutMs: number): void {
+    this.lastSeen.set(claudeId, Date.now());
     const set = this.byId.get(claudeId) ?? new Set<Waiter>();
     const waiter: Waiter = {
       res,

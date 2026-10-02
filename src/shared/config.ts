@@ -29,6 +29,8 @@ export function mergeConfig(base: DaemonConfig, overlay: Partial<DaemonConfig>):
         : base.transport,
     port: overlay.port ?? base.port,
     host: overlay.host ?? base.host,
+    inject_mode: overlay.inject_mode === "sentinel" ? "sentinel" : base.inject_mode,
+    notify: typeof overlay.notify === "boolean" ? overlay.notify : base.notify,
     redact: { ...base.redact, ...(overlay.redact ?? {}) },
     statusline: { ...base.statusline, ...(overlay.statusline ?? {}) },
   };

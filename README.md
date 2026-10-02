@@ -12,7 +12,7 @@ claudemesh --resume # any other claude flag works the same
 
 Anything that isn't a recognized subcommand (`list`, `send`, `install`, …) is forwarded straight to the wrapped `claude` binary, so `claudemesh` is a drop-in alternative entrypoint to `claude` — no alias, no shadow, no plugin install inside Claude. You get every feature of Claude Code (sessions, hooks, plugins, MCP, sub-agents, slash commands, IDE integration) plus the inter-instance side channel.
 
-> Status: v0.2 — realtime PTY supervisor + folder-name addressing + idle tracking.
+> Status: v0.2 — realtime PTY supervisor with body injection, unix-socket daemon, folder-name addressing, idle tracking.
 
 ## Why
 
@@ -35,7 +35,7 @@ There are two layers, and you can use either independently:
    │  ┌── claudemesh (PTY supervisor) ────────┐   │  ← Layer 2: realtime injection
    │  │   ↑↓ proxy user terminal ↔ claude  │   │      (when launched via `claudemesh`)
    │  │   subscribes to daemon /events      │   │
-   │  │   writes "[inbox]\n" to PTY master  │   │
+   │  │   pastes the message into the PTY   │   │
    │  └─┬─────────────────────────────────┬─┘   │
    │    │ (PTY pair)                      │     │
    │  ┌─▼──────────────── claude ──────────▼─┐  │  ← Layer 1: hooks + MCP
@@ -64,10 +64,13 @@ The daemon listens on a `0600` unix socket in `~/.claudemesh/` by default (TCP o
 `claudemesh` spawns `claude` inside a PTY (via `node-pty`) and proxies your terminal byte-for-byte to/from it — so it looks and feels exactly like running `claude` directly. Any flag you pass to `claudemesh` (e.g. `claudemesh -c`, `claudemesh --resume <id>`) is forwarded to claude. In parallel the supervisor long-polls the daemon for new inbox messages addressed to this session. When one arrives:
 
 1. Wait for the daemon's `idle` flag on this session to be `true` (the `Stop` hook sets it when claude finishes a turn; the `UserPromptSubmit` hook clears it).
-2. Wait for ≥500ms of stdin silence (so we don't corrupt typing).
-3. Write `[inbox]\n` to the PTY master.
+2. Wait for ≥500ms of stdin silence and no half-typed draft (so we don't corrupt or submit your typing).
+3. Check the inbox still holds a `task` (a hook may have delivered it first; notes alone never wake).
+4. Drain the inbox and paste the messages into the PTY as one bracketed paste, each prefixed with `[claudemesh message from <id> (<folder>) — reply with send_message to "<id>"]`, then Enter.
 
-That sentinel is read by claude as if you typed it. `UserPromptSubmit` fires, the hook drains the inbox, and the messages arrive as additional context attached to that turn — with explicit instructions to _act_ on `kind="task"` bodies, not just acknowledge them. End-to-end latency from `send` to claude starting work is sub-second on a healthy machine.
+The message _is_ the prompt: claude treats it exactly like something you typed, the attribution line tells it who to answer, and `UserPromptSubmit` finds an empty inbox so nothing is duplicated. Multi-line bodies are safe because the whole thing goes through in a single paste. Measured end to end on a real session: ~250ms from `send` to the text landing in claude's input, and claude starting work immediately after.
+
+Set `"inject_mode": "sentinel"` in `config.json` to get the older behaviour instead: the supervisor types `[inbox]` and the `UserPromptSubmit` hook attaches the messages as additional context.
 
 ### Without the supervisor (bare `claude`)
 
@@ -95,7 +98,7 @@ What you lose is the **wake-up for fully-idle claude**: messages that arrive aft
 > Requires Node ≥ 20. The supervisor needs `node-pty` (native, prebuilt for darwin/linux/win).
 
 ```bash
-npm i -g @ktamas77/claudemesh
+npm i -g claudemesh
 claudemesh install
 ```
 
@@ -161,8 +164,9 @@ printf '%s\n' "$out"
 claudemesh [claude args...]              launch claude inside the realtime supervisor
                                        (e.g. `claudemesh -c`, `claudemesh --resume <id>`)
 claudemesh list                          show all live Claude sessions
-claudemesh whoami                        this shell's parent claude (best-effort by ppid)
+claudemesh whoami                        the claude session this shell runs under (walks the process tree)
 claudemesh send <target> <message>       send a task message; target = id or folder name
+                                       (from = your own session when run inside claude's Bash tool)
 claudemesh history <target> [-n N]       tail another session's transcript
 claudemesh search <target> <query>       search another session's transcript
 claudemesh status                        daemon health + instance count
@@ -210,12 +214,14 @@ The `claudemesh` MCP server exposes the following inside every `claude` session.
 Two kinds:
 
 - **task** (default) — receiver acts on the body as if you typed it. Three delivery paths, in priority order:
-  1. **Supervisor injection (realtime)** — if the receiver was launched via `claudemesh`, the supervisor writes `[inbox]\n` into the PTY the moment the message arrives and the receiver is idle + not actively typing. Sub-second wake-up.
+  1. **Supervisor injection (realtime)** — if the receiver was launched via `claudemesh`, the supervisor pastes the message into the PTY the moment it arrives and the receiver is idle, not typing, and has no pending draft. Sub-second wake-up.
   2. **Stop hook (between turns)** — if the receiver is _just finishing_ a turn when the message lands, the `Stop` hook blocks the stop and feeds the message in as the continuation directive.
   3. **UserPromptSubmit (next prompt)** — if neither of the above caught it (bare `claude`, fully idle), the message sits in the inbox until the user submits any prompt to that receiver, at which point it's appended as additional context for that turn.
-- **note** — surfaces only via path #3 (next prompt). Doesn't block stops, doesn't wake the model.
+- **note** — surfaces only via path #3 (next prompt), or rides along when a task wakes the session. Doesn't block stops, doesn't wake the model.
 
 Inbox is at-least-once and drained on read.
+
+**Desktop notification fallback.** When a task lands in a session that is idle _and_ has no supervisor attached (bare `claude`), nothing can wake the model, so the daemon posts a desktop notification (`osascript` on macOS, `notify-send` on Linux) naming the target folder and the sender. Disable with `"notify": false`.
 
 ### Idle tracking
 
@@ -238,12 +244,16 @@ The supervisor reads this flag before injecting, ensuring it never types into a 
   "host": "127.0.0.1",
   "port": 7878,
   "token": null,
+  "inject_mode": "body",
+  "notify": true,
   "redact": { "enabled": true, "line_byte_cap": 4096 },
   "statusline": { "show_peers": true, "show_inbox": true }
 }
 ```
 
 - `transport`: `"unix"` (default on macOS/Linux) or `"tcp"` (default on Windows). Switching restarts the daemon on the next command.
+- `inject_mode`: `"body"` (default) pastes the message text into claude; `"sentinel"` types `[inbox]` and lets the hook attach the messages as context.
+- `notify`: desktop notification for tasks that reach an idle, unsupervised session (default `true`).
 - `token`: shared secret sent as a bearer header. Required when `host` is not loopback. Cross-machine use is not supported yet; [docs/transport.md](./docs/transport.md) explains what is missing.
 - `CLAUDEMESH_HOME` env var relocates the whole state directory (used by the tests).
 
@@ -280,7 +290,7 @@ src/
 ├── bin/claudemesh.ts          # entrypoint, dispatches all subcommands
 ├── cli/
 │   ├── run.ts               # PTY supervisor (default `claudemesh` entrypoint)
-│   ├── inject.ts            # pure "may we type into claude now?" decision (tested)
+│   ├── inject.ts            # pure "may we type into claude now?" decision + paste rendering (tested)
 │   ├── send.ts, history.ts, search.ts, list.ts, whoami.ts, status.ts
 │   ├── install.ts, statusline.ts
 │   └── ...
@@ -288,11 +298,12 @@ src/
 │   ├── server.ts            # HTTP routes incl. /events long-poll, PATCH idle; unix socket or TCP
 │   ├── registry.ts          # id ↔ session ↔ pid ↔ cwd, idle flag
 │   ├── inbox.ts             # per-recipient jsonl
-│   ├── waiters.ts           # pub-sub for the events long-poll
+│   ├── waiters.ts           # pub-sub for the events long-poll (+ "is this session supervised?")
+│   ├── notify.ts            # desktop notification fallback for idle, unsupervised sessions
 │   └── liveness.ts          # prune dead PIDs
 ├── mcp/server.ts            # stdio MCP server
 ├── hooks/                   # session-start, session-end, user-prompt-submit, stop
-└── shared/                  # paths, ids, http client, transcript reader, resolver
+└── shared/                  # paths, ids, http client, transcript reader, resolver, process-tree self-lookup
 ```
 
 ## Roadmap
@@ -308,9 +319,11 @@ src/
 - [x] Process-stable `claude_id` across `/clear`; supervisor skips injection when a hook already delivered, and never submits a half-typed draft
 - [ ] Real-world soak across many concurrent supervisor sessions
 - [ ] Network mode: heartbeat-based liveness + remote transcript access (see docs/transport.md)
-- [ ] Reply chains: auto-set `from` when a recipient calls `send_message` after waking
-- [ ] Optional desktop notification fallback for un-supervised idle sessions
-- [ ] Inject the message body itself instead of an `[inbox]` sentinel (bracketed paste for multi-line; prepend `from <id> · ` for attribution; preserve existing path as fallback when paste mode unavailable)
+- [ ] Publish 0.2.0 to npm (registry is still at 0.1.1)
+- [x] Reply chains: `from` is the sender's own session in both the MCP tool and the CLI (which walks the process tree from inside claude's Bash tool); pasted messages carry a `reply with send_message to "<id>"` line
+- [x] Desktop notification fallback for un-supervised idle sessions (`notify`)
+- [x] Inject the message body itself instead of an `[inbox]` sentinel — bracketed paste, sender attribution, `inject_mode: "sentinel"` kept as fallback. Verified live: ~250ms send→paste, model acts on it
+- [x] Notes never wake a session on their own (matches the contract above; previously they did)
 
 ### Why not tmux?
 

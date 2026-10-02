@@ -33,6 +33,14 @@ export interface DaemonConfig {
   port: number;
   /** Shared secret sent as `Authorization: Bearer <token>`. Required for non-loopback TCP. */
   token?: string;
+  /**
+   * How the supervisor wakes an idle claude:
+   *  "body"     (default) paste the message text itself via bracketed paste, attributed to the sender
+   *  "sentinel" type `[inbox]`; the UserPromptSubmit hook then attaches the messages as context
+   */
+  inject_mode: "body" | "sentinel";
+  /** Desktop notification when a task lands in an idle session with no supervisor attached. */
+  notify: boolean;
   redact: {
     enabled: boolean;
     line_byte_cap: number;
@@ -47,6 +55,8 @@ export const DEFAULT_CONFIG: DaemonConfig = {
   transport: process.platform === "win32" ? "tcp" : "unix",
   port: 7878,
   host: "127.0.0.1",
+  inject_mode: "body",
+  notify: true,
   redact: {
     enabled: true,
     line_byte_cap: 4096,

@@ -3,14 +3,22 @@ import { accessSync, constants as fsConstants, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { daemon, DaemonError } from "../shared/client.js";
 import { ensureDaemonRunning } from "../shared/daemon-spawn.js";
-import { decideInject, updateDraft, type InputState } from "./inject.js";
+import {
+  decideInject,
+  updateDraft,
+  renderForPaste,
+  wrapPaste,
+  WAKE_SENTINEL,
+  type InputState,
+} from "./inject.js";
+import { loadConfig } from "../shared/config.js";
+import { basename } from "node:path";
 
 type IPty = NodePty.IPty;
 
 const POLL_REGISTER_INTERVAL_MS = 100;
 const EVENTS_LONG_POLL_MS = 25_000;
 const INJECT_RETRY_MS = 250;
-const WAKE_SENTINEL = "[inbox]";
 
 export async function runChild(args: string[]): Promise<void> {
   let ptySpawn: typeof NodePty.spawn;
@@ -153,15 +161,39 @@ function startSubscriber(child: IPty, input: InputState): () => void {
             pendingWake = false;
             return;
           case "inject":
-            try {
-              child.write(`${WAKE_SENTINEL}\r`);
-              pendingWake = false;
-            } catch {
-              // child gone
-            }
+            pendingWake = false;
+            void deliver(claudeId!);
         }
       })
       .catch(() => setTimeout(tryInject, INJECT_RETRY_MS));
+  };
+
+  // Type the wake into claude. "body" mode drains the inbox here and pastes the rendered
+  // messages (the UserPromptSubmit hook then finds an empty inbox and adds nothing).
+  // "sentinel" mode types `[inbox]` and lets the hook attach the messages as context.
+  // Either way: notes alone never wake — they ride along only when a task is present.
+  const deliver = async (id: string): Promise<void> => {
+    try {
+      const pending = await daemon.peekInbox(id);
+      if (!pending.some((m) => m.kind === "task")) return;
+      if (loadConfig().inject_mode === "sentinel") {
+        child.write(`${WAKE_SENTINEL}\r`);
+        return;
+      }
+      const messages = await daemon.drainInbox(id);
+      if (messages.length === 0) return;
+      const names = new Map<string, string>();
+      try {
+        for (const r of await daemon.list()) names.set(r.claude_id, basename(r.cwd));
+      } catch {
+        // attribution is best-effort
+      }
+      child.write(wrapPaste(renderForPaste(messages, (from) => names.get(from))));
+      child.write("\r");
+    } catch {
+      // child gone or daemon hiccup; the message is still in the inbox (sentinel path) or
+      // was drained and pasted partially (body path) — nothing more we can safely do.
+    }
   };
 
   const loop = async (): Promise<void> => {

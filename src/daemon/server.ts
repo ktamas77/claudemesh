@@ -7,9 +7,12 @@ import { loadConfig, socketPath, validateServeConfig } from "../shared/config.js
 import { packageVersion } from "../shared/version.js";
 import { chmodSync, existsSync, unlinkSync } from "node:fs";
 import { readTranscript, searchTranscript, getTurn } from "../shared/transcript.js";
+import { shouldNotify, sendDesktopNotification, SUPERVISED_WINDOW_MS } from "./notify.js";
+import { basename } from "node:path";
 import type { InstanceRecord, MessageKind } from "../shared/types.js";
 
 interface RouteContext {
+  cfg: ReturnType<typeof loadConfig>;
   registry: Registry;
   inbox: InboxStore;
   waiters: Waiters;
@@ -41,7 +44,7 @@ export async function startDaemon(): Promise<DaemonHandle> {
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
-    handle(req, res, registry, inbox, waiters).catch((err: unknown) => {
+    handle(req, res, cfg, registry, inbox, waiters).catch((err: unknown) => {
       sendJson(res, 500, { error: (err as Error).message });
     });
   });
@@ -103,13 +106,14 @@ export async function startDaemon(): Promise<DaemonHandle> {
 async function handle(
   req: IncomingMessage,
   res: ServerResponse,
+  cfg: ReturnType<typeof loadConfig>,
   registry: Registry,
   inbox: InboxStore,
   waiters: Waiters,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
   const body = await readBody(req);
-  const ctx: RouteContext = { registry, inbox, waiters, req, res, url, body };
+  const ctx: RouteContext = { cfg, registry, inbox, waiters, req, res, url, body };
 
   if (req.method === "GET" && url.pathname === "/healthz") return health(ctx);
   if (req.method === "POST" && url.pathname === "/register") return register(ctx);
@@ -134,7 +138,7 @@ async function handle(
 }
 
 function instanceRoute(ctx: RouteContext, claudeId: string, sub: string): void {
-  const { req, res, registry, inbox, waiters, body, url } = ctx;
+  const { req, res, cfg, registry, inbox, waiters, body, url } = ctx;
   const rec = registry.get(claudeId);
   if (!rec && req.method !== "DELETE") {
     return sendJson(res, 404, { error: `unknown claude_id: ${claudeId}` });
@@ -177,7 +181,23 @@ function instanceRoute(ctx: RouteContext, claudeId: string, sub: string): void {
     const msg = inbox.append(appendArgs);
     registry.setPendingCount(claudeId, inbox.count(claudeId));
     registry.touch(claudeId);
-    waiters.notify(claudeId, { type: "message", pending: inbox.count(claudeId) });
+    // Notes are silent until the recipient's next prompt (README contract) — only tasks wake.
+    if (msg.kind === "task") {
+      waiters.notify(claudeId, { type: "message", pending: inbox.count(claudeId) });
+    }
+    if (
+      shouldNotify({
+        enabled: cfg.notify,
+        kind: msg.kind,
+        idle: rec!.idle,
+        supervised: waiters.recentlySeen(claudeId, SUPERVISED_WINDOW_MS),
+      })
+    ) {
+      sendDesktopNotification(
+        `claudemesh → ${basename(rec!.cwd) || claudeId}`,
+        `task from ${msg.from}: ${msg.body}`,
+      );
+    }
     return sendJson(res, 200, { id: msg.id });
   }
   if (sub === "/messages" && req.method === "GET") {
