@@ -33,8 +33,9 @@ export async function startDaemon(): Promise<DaemonHandle> {
   const cfg = loadConfig();
   const invalid = validateServeConfig(cfg);
   if (invalid) throw new Error(invalid);
-  const registry = new Registry();
   const inbox = new InboxStore();
+  // Dead or departed sessions take their undelivered inbox with them (liveness sweep + DELETE).
+  const registry = new Registry((id) => inbox.clear(id));
   const waiters = new Waiters();
   syncPendingCounts(registry, inbox);
   const sweepTimer = startLivenessSweep(registry);

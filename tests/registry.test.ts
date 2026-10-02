@@ -55,6 +55,14 @@ describe("Registry identity", () => {
     expect(reg.list()).toHaveLength(2);
   });
 
+  it("calls onUnregister so the owner can drop per-session state", () => {
+    const gone: string[] = [];
+    const r = new Registry((id) => gone.push(id));
+    const a = r.register({ ...base, session_id: "s1", claude_pid: 100 });
+    r.unregister(a.claude_id);
+    expect(gone).toEqual([a.claude_id]);
+  });
+
   it("persists and reloads", () => {
     const a = reg.register({ ...base, session_id: "s1", claude_pid: 100 });
     const reloaded = new Registry();

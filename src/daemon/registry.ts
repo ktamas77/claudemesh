@@ -15,7 +15,8 @@ export class Registry {
   private bySession = new Map<string, string>();
   private byClaudePid = new Map<number, string>();
 
-  constructor() {
+  /** `onUnregister` lets the server drop per-session state it owns (the inbox file). */
+  constructor(private readonly onUnregister: (claudeId: string) => void = () => undefined) {
     this.load();
   }
 
@@ -95,6 +96,7 @@ export class Registry {
     this.byClaudePid.delete(rec.claude_pid);
     this.removeSessionFile(rec.session_id);
     this.persist();
+    this.onUnregister(claudeId);
     return true;
   }
 

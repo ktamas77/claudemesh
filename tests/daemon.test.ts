@@ -93,6 +93,20 @@ describe("daemon over unix socket", () => {
     expect(all.filter((r) => r.cwd === "/tmp/x")).toHaveLength(1);
   });
 
+  it("unregister removes the session's inbox file (no orphans)", async () => {
+    const { existsSync } = await import("node:fs");
+    const rec = await daemon.register({
+      session_id: "sz",
+      claude_pid: 434343,
+      cwd: "/tmp/z",
+      transcript_path: "/dev/null",
+    });
+    await daemon.sendMessage(rec.claude_id, { from: "cli", body: "left behind?", kind: "note" });
+    expect(existsSync(paths.inboxFile(rec.claude_id))).toBe(true);
+    await daemon.unregister(rec.claude_id);
+    expect(existsSync(paths.inboxFile(rec.claude_id))).toBe(false);
+  });
+
   it("404s on unknown ids with a DaemonError", async () => {
     await expect(daemon.get("zzzzzzzz")).rejects.toBeInstanceOf(DaemonError);
   });
