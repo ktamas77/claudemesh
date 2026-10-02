@@ -29,7 +29,7 @@ export async function runChild(args: string[]): Promise<void> {
       "[claudemesh run] node-pty failed to load. The PTY supervisor needs node-pty (a native module).",
     );
     console.error(`  underlying error: ${(err as Error).message}`);
-    console.error("  Try: cd $(npm root -g)/@ktamas77/claudemesh && npm rebuild node-pty");
+    console.error("  Try: cd $(npm root -g)/claudemesh && npm rebuild node-pty");
     console.error(
       "  Meanwhile you can keep using bare `claude`; hooks + MCP + status line still work,",
     );
